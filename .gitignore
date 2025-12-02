@@ -1,0 +1,12 @@
+# Virtual environments
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment files and secrets
+.env
+
+# macOS artifacts
+.DS_Store
