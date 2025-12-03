@@ -320,15 +320,52 @@ async def run() -> None:
                 continue
 
             print(f"Topic '{topic.title}': {len(messages)} messages in window")
-            text_data = format_messages(messages, truncated, timeframe_label)
+            
+            CHUNK_SIZE = 1000
+            summary = ""
+            feedback = None
             retried = False
 
-            try:
-                summary, feedback = run_summary(model, topic.title, text_data, timeframe_label)
-            except Exception as exc:  # noqa: BLE001
-                print(f"Gemini error for topic '{topic.title}': {exc}")
-                summary = None
-                feedback = "exception"
+            if len(messages) > CHUNK_SIZE:
+                print(f"  > Large topic ({len(messages)} msgs). Splitting into chunks of {CHUNK_SIZE}...")
+                partial_summaries = []
+                
+                for i in range(0, len(messages), CHUNK_SIZE):
+                    chunk = messages[i : i + CHUNK_SIZE]
+                    print(f"  > Processing chunk {i//CHUNK_SIZE + 1} ({len(chunk)} messages)...")
+                    chunk_text = format_messages(chunk, truncated=False, timeframe_label=timeframe_label)
+                    
+                    try:
+                        chunk_summary, chunk_feedback = run_summary(model, topic.title, chunk_text, timeframe_label)
+                        if chunk_summary:
+                            partial_summaries.append(chunk_summary)
+                        else:
+                            print(f"  > Chunk {i//CHUNK_SIZE + 1} failed: {chunk_feedback}")
+                    except Exception as exc:
+                        print(f"  > Chunk {i//CHUNK_SIZE + 1} exception: {exc}")
+
+                if partial_summaries:
+                    print("  > Generating final summary from partial summaries...")
+                    combined_text = "\n\n".join(partial_summaries)
+                    # Use a slightly modified prompt context if needed, but standard run_summary should work
+                    # We treat the combined summaries as the "text data"
+                    try:
+                        summary, feedback = run_summary(model, topic.title, combined_text, timeframe_label)
+                    except Exception as exc:
+                        print(f"  > Final summary exception: {exc}")
+                        summary = None
+                        feedback = "exception"
+                else:
+                    print("  > No partial summaries generated.")
+            else:
+                # Standard processing for smaller topics
+                text_data = format_messages(messages, truncated, timeframe_label)
+                try:
+                    summary, feedback = run_summary(model, topic.title, text_data, timeframe_label)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"Gemini error for topic '{topic.title}': {exc}")
+                    summary = None
+                    feedback = "exception"
 
             if not summary:
                 retried = False
@@ -336,21 +373,21 @@ async def run() -> None:
                 if should_retry and len(messages) > FALLBACK_MESSAGES:
                     fallback_msgs = messages[-FALLBACK_MESSAGES:]
                     fallback_text = format_messages(fallback_msgs, truncated=True, timeframe_label=timeframe_label)
-                    print(f"Retrying topic '{topic.title}' with last {FALLBACK_MESSAGES} messages due to block.")
+                    print(f"Retrying topic '{topic.title}' with last {FALLBACK_MESSAGES} messages due to block/error.")
                     try:
                         summary, feedback = run_summary(model, topic.title, fallback_text, timeframe_label)
                         retried = True
                     except Exception as exc:  # noqa: BLE001
                         print(f"Gemini error on retry for topic '{topic.title}': {exc}")
 
-                if not summary:
-                    if feedback:
-                        reason = f"{feedback} (retried)" if retried else feedback
-                        print(f"Gemini blocked topic '{topic.title}' with reason: {reason}")
-                    else:
-                        print(f"No summary generated for topic '{topic.title}'.")
-                    topics_no_summary.append(topic.title)
-                    continue
+            if not summary:
+                if feedback:
+                    reason = f"{feedback} (retried)" if retried else feedback
+                    print(f"Gemini blocked topic '{topic.title}' with reason: {reason}")
+                else:
+                    print(f"No summary generated for topic '{topic.title}'.")
+                topics_no_summary.append(topic.title)
+                continue
 
             if retried:
                 summary = f"(重试后生成，使用最后 {FALLBACK_MESSAGES} 条消息)\n\n{summary}"
