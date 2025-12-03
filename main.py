@@ -13,8 +13,10 @@ try:
 except ImportError:
     load_dotenv = None
 
-TIME_WINDOW_HOURS = 4
-INTERVAL_HOURS = TIME_WINDOW_HOURS
+INTERVAL_HOURS = 4  # Keep for prompt context, or update dynamically if needed? 
+# Actually, the prompt says "past {INTERVAL_HOURS} hours". We should probably update that too or just say "recent".
+# Let's keep INTERVAL_HOURS as a fallback or update it in run().
+
 HK_TZ = pytz.timezone("Asia/Hong_Kong")
 TOPIC_LIMIT = 50
 MAX_MESSAGES_PER_TOPIC = 5000
@@ -57,6 +59,18 @@ def parse_target_group(raw: str):
             value = int(f"-100{abs(value)}")
         return value
     return stripped
+
+
+def get_dynamic_window_hours() -> float:
+    """
+    Returns 6.0 hours if running between 06:00 and 08:00 HK time (morning run).
+    Otherwise returns 3.5 hours.
+    """
+    now_hk = datetime.now(HK_TZ)
+    # If running between 06:00 and 07:59, assume it's the "morning summary" covering the night.
+    if 6 <= now_hk.hour < 8:
+        return 6.0
+    return 3.5
 
 
 async def fetch_topics(client: TelegramClient, target) -> list[types.ForumTopic]:
@@ -199,9 +213,10 @@ def format_messages(messages: list[dict], truncated: bool, timeframe_label: str)
 def get_ai_summary(
     model: genai.GenerativeModel, topic_name: str, text_data: str, timeframe_label: str
 ) -> tuple[str, str | None]:
+    # Extract hours from label or just say "recent"
     prompt = f"""
     你是这个加密货币社群（Crypto Farming Group）的 AI 秘书。
-    以下是关于「{topic_name}」话题过去 {INTERVAL_HOURS} 小时内的对话记录。
+    以下是关于「{topic_name}」话题这段时间内的对话记录。
     时间范围：{timeframe_label}
     
     【背景知识】：
@@ -255,14 +270,37 @@ def run_summary(
 
 
 async def send_summary(
-    client: TelegramClient, target, topic: types.ForumTopic, summary: str, test_mode: bool
+    client: TelegramClient, target, topic: types.ForumTopic, summary: str, message_count: int, test_mode: bool
 ) -> None:
-    header = f"[Summary] Topic: {topic.title}"
+    header = f"[Summary] Topic: {topic.title} ({message_count} messages)"
     payload = f"{header}\n\n{summary}"
     if test_mode:
         await client.send_message("me", payload)
     else:
         await client.send_message(target, payload, reply_to=topic.top_message)
+
+
+async def run_summary_with_retry(
+    model: genai.GenerativeModel, topic_title: str, text_data: str, timeframe_label: str, max_retries: int = 3
+) -> tuple[str, str | None]:
+    for attempt in range(max_retries):
+        try:
+            summary, feedback = run_summary(model, topic_title, text_data, timeframe_label)
+            if summary:
+                return summary, feedback
+            
+            # If blocked by safety settings, retrying the same content usually won't help
+            if feedback and "prompt_blocked" in feedback:
+                return summary, feedback
+                
+        except Exception as exc:
+            print(f"  > Attempt {attempt+1}/{max_retries} failed for '{topic_title}': {exc}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 * (attempt + 1))
+            else:
+                return None, f"exception: {exc}"
+    
+    return None, "max_retries_exceeded"
 
 
 async def run() -> None:
@@ -284,7 +322,10 @@ async def run() -> None:
         generation_config={"temperature": 0.3},
     )
 
-    cutoff_utc = datetime.now(tz=pytz.UTC) - timedelta(hours=TIME_WINDOW_HOURS)
+    window_hours = get_dynamic_window_hours()
+    print(f"Dynamic time window: {window_hours} hours")
+
+    cutoff_utc = datetime.now(tz=pytz.UTC) - timedelta(hours=window_hours)
     timeframe_label = (
         f"{cutoff_utc.astimezone(HK_TZ).strftime('%m/%d %H:%M')} - "
         f"{datetime.now(tz=pytz.UTC).astimezone(HK_TZ).strftime('%m/%d %H:%M')} (Asia/Hong_Kong)"
@@ -335,50 +376,33 @@ async def run() -> None:
                     print(f"  > Processing chunk {i//CHUNK_SIZE + 1} ({len(chunk)} messages)...")
                     chunk_text = format_messages(chunk, truncated=False, timeframe_label=timeframe_label)
                     
-                    try:
-                        chunk_summary, chunk_feedback = run_summary(model, topic.title, chunk_text, timeframe_label)
-                        if chunk_summary:
-                            partial_summaries.append(chunk_summary)
-                        else:
-                            print(f"  > Chunk {i//CHUNK_SIZE + 1} failed: {chunk_feedback}")
-                    except Exception as exc:
-                        print(f"  > Chunk {i//CHUNK_SIZE + 1} exception: {exc}")
+                    chunk_summary, chunk_feedback = await run_summary_with_retry(model, topic.title, chunk_text, timeframe_label)
+                    if chunk_summary:
+                        partial_summaries.append(chunk_summary)
+                    else:
+                        print(f"  > Chunk {i//CHUNK_SIZE + 1} failed: {chunk_feedback}")
 
                 if partial_summaries:
                     print("  > Generating final summary from partial summaries...")
                     combined_text = "\n\n".join(partial_summaries)
-                    # Use a slightly modified prompt context if needed, but standard run_summary should work
-                    # We treat the combined summaries as the "text data"
-                    try:
-                        summary, feedback = run_summary(model, topic.title, combined_text, timeframe_label)
-                    except Exception as exc:
-                        print(f"  > Final summary exception: {exc}")
-                        summary = None
-                        feedback = "exception"
+                    summary, feedback = await run_summary_with_retry(model, topic.title, combined_text, timeframe_label)
                 else:
                     print("  > No partial summaries generated.")
             else:
                 # Standard processing for smaller topics
                 text_data = format_messages(messages, truncated, timeframe_label)
-                try:
-                    summary, feedback = run_summary(model, topic.title, text_data, timeframe_label)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"Gemini error for topic '{topic.title}': {exc}")
-                    summary = None
-                    feedback = "exception"
+                summary, feedback = await run_summary_with_retry(model, topic.title, text_data, timeframe_label)
 
             if not summary:
                 retried = False
-                should_retry = (feedback and "prompt_blocked" in feedback) or (feedback == "exception")
+                should_retry = (feedback and "prompt_blocked" in feedback) or (feedback and "exception" in feedback)
                 if should_retry and len(messages) > FALLBACK_MESSAGES:
                     fallback_msgs = messages[-FALLBACK_MESSAGES:]
                     fallback_text = format_messages(fallback_msgs, truncated=True, timeframe_label=timeframe_label)
                     print(f"Retrying topic '{topic.title}' with last {FALLBACK_MESSAGES} messages due to block/error.")
-                    try:
-                        summary, feedback = run_summary(model, topic.title, fallback_text, timeframe_label)
+                    summary, feedback = await run_summary_with_retry(model, topic.title, fallback_text, timeframe_label)
+                    if summary:
                         retried = True
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"Gemini error on retry for topic '{topic.title}': {exc}")
 
             if not summary:
                 if feedback:
@@ -389,10 +413,12 @@ async def run() -> None:
                 topics_no_summary.append(topic.title)
                 continue
 
+            final_count = len(messages)
             if retried:
                 summary = f"(重试后生成，使用最后 {FALLBACK_MESSAGES} 条消息)\n\n{summary}"
+                final_count = min(len(messages), FALLBACK_MESSAGES)
 
-            await send_summary(client, target, topic, summary, test_mode)
+            await send_summary(client, target, topic, summary, final_count, test_mode)
             destination = "Saved Messages" if test_mode else f"Topic: {topic.title}"
             print(f"Sent summary to {destination}")
             summaries_sent += 1
