@@ -3,11 +3,12 @@
 Summarizes Telegram forum topics (topics-enabled group) every 4 hours using Google Gemini, with output sent to your Saved Messages (test mode) or back into each topic.
 
 ## Features
-- Fetches last 4 hours of text messages per topic; skips media.
-- Handles forum topics; per-topic message caps with retry on blocked prompts.
-- Gemini prompt tailored for a Chinese crypto-farming community with VIP handling for “笑苍生”.
-- Test mode sends to Saved Messages; production mode replies in the topic.
-- Optional topic filter to process a single topic by title substring.
+- **Dynamic Time Window**: Automatically adjusts lookback period based on time of day (6 hours for morning run, 3.5 hours for daytime runs).
+- **Large Topic Handling**: Automatically splits topics with >1000 messages into chunks for summarization, then combines them.
+- **Robust Error Handling**: Retries API calls up to 3 times on server errors; falls back to last 500 messages if full context fails.
+- **Message Count**: Displays the number of processed messages in the summary header.
+- **Tailored Prompt**: Specialized for a Chinese crypto-farming community with VIP handling for "笑苍生".
+- **Test Mode**: Sends to Saved Messages; production mode replies in the topic.
 
 ## Requirements
 - Python 3.11+
@@ -54,10 +55,14 @@ git push -u origin main
 ```
 
 ## GitHub Actions
-- Workflow: `.github/workflows/summary.yml` (cron every 4 hours + manual dispatch).
+- Workflow: `.github/workflows/summary.yml`
+- **Schedule**: Runs at 07:00, 10:30, 14:00, 17:30, 21:00, 00:30 (HKT).
 - Set repository secrets: `TG_API_ID`, `TG_API_HASH`, `TG_SESSION_STRING`, `GEMINI_API_KEY`, `TARGET_GROUP`, optional `TEST_MODE`, `TOPIC_FILTER`.
 
 ## Notes
-- Timezone: Asia/Hong_Kong; timeframe label included in prompts.
-- Message caps: `MAX_MESSAGES_PER_TOPIC` and `FALLBACK_MESSAGES` in `main.py`.
-- Safety: Gemini safety settings set to BLOCK_NONE; blocked prompts retry with fewer messages and mark the output.
+- **Timezone**: Asia/Hong_Kong.
+- **Safety**: Gemini safety settings set to BLOCK_NONE.
+- **Limits**: 
+    - `CHUNK_SIZE`: 1000 messages (for splitting).
+    - `FALLBACK_MESSAGES`: 500 messages (last resort).
+    - `MAX_MESSAGES_PER_TOPIC`: 5000 messages (hard cap).
