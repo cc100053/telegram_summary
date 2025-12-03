@@ -12,7 +12,7 @@
 
 **Key Functionality:**
 
-1.  **Schedule:** The script runs once (for a cron job), processes data from the last **8 hours**, then exits.
+1.  **Schedule:** The script runs once (for a cron job), processes data from the last **4 hours**, then exits.
 2.  **Topics:** The target group has **Forum Topics**. Iterate through them.
 3.  **Fetching:** Fetch only text messages.
 4.  **Safety:** Set Gemini safety settings to `BLOCK_NONE` (to avoid blocking crypto slang).
@@ -55,3 +55,7 @@ Please use the following prompt string inside the `get_ai_summary` function:
     {text_data}
     """
 ```
+
+https://github.com/cc100053/telegram_summary.git
+
+git remote add origin git@github.com:cc100053/telegram_summary.git

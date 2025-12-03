@@ -1,9 +1,9 @@
 # Telegram Forum Summarizer
 
-Summarizes Telegram forum topics (topics-enabled group) every 8 hours using Google Gemini, with output sent to your Saved Messages (test mode) or back into each topic.
+Summarizes Telegram forum topics (topics-enabled group) every 4 hours using Google Gemini, with output sent to your Saved Messages (test mode) or back into each topic.
 
 ## Features
-- Fetches last 8 hours of text messages per topic; skips media.
+- Fetches last 4 hours of text messages per topic; skips media.
 - Handles forum topics; per-topic message caps with retry on blocked prompts.
 - Gemini prompt tailored for a Chinese crypto-farming community with VIP handling for “笑苍生”.
 - Test mode sends to Saved Messages; production mode replies in the topic.
@@ -54,7 +54,7 @@ git push -u origin main
 ```
 
 ## GitHub Actions
-- Workflow: `.github/workflows/summary.yml` (cron every 8 hours + manual dispatch).
+- Workflow: `.github/workflows/summary.yml` (cron every 4 hours + manual dispatch).
 - Set repository secrets: `TG_API_ID`, `TG_API_HASH`, `TG_SESSION_STRING`, `GEMINI_API_KEY`, `TARGET_GROUP`, optional `TEST_MODE`, `TOPIC_FILTER`.
 
 ## Notes

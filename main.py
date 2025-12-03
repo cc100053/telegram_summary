@@ -13,7 +13,7 @@ try:
 except ImportError:
     load_dotenv = None
 
-TIME_WINDOW_HOURS = 8
+TIME_WINDOW_HOURS = 4
 INTERVAL_HOURS = TIME_WINDOW_HOURS
 HK_TZ = pytz.timezone("Asia/Hong_Kong")
 TOPIC_LIMIT = 50
