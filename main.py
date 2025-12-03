@@ -327,11 +327,13 @@ async def run() -> None:
                 summary, feedback = run_summary(model, topic.title, text_data, timeframe_label)
             except Exception as exc:  # noqa: BLE001
                 print(f"Gemini error for topic '{topic.title}': {exc}")
-                continue
+                summary = None
+                feedback = "exception"
 
             if not summary:
                 retried = False
-                if feedback and "prompt_blocked" in feedback and len(messages) > FALLBACK_MESSAGES:
+                should_retry = (feedback and "prompt_blocked" in feedback) or (feedback == "exception")
+                if should_retry and len(messages) > FALLBACK_MESSAGES:
                     fallback_msgs = messages[-FALLBACK_MESSAGES:]
                     fallback_text = format_messages(fallback_msgs, truncated=True, timeframe_label=timeframe_label)
                     print(f"Retrying topic '{topic.title}' with last {FALLBACK_MESSAGES} messages due to block.")
