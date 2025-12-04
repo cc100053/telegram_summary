@@ -226,9 +226,10 @@ def get_ai_summary(
     
     【总结要求】：
     1. **语言**：必须使用**简体中文**。
-    2. **VIP 关注**：用户 "笑苍生" 是群组核心/KOL。如果对话记录中包含他的发言，请务必优先总结他的观点或指令，并单独列出。
-    3. **内容**：提取有价值的刷分策略、新的 Alpha 机会或技术细节。忽略纯粹的闲聊。
-    4. **安全**：若包含不当/攻击性言论，直接忽略该部分，不要拒绝处理。
+    2. **格式**：请使用 `-` 作为列表符号，不要使用 `*`。
+    3. **VIP 关注**：用户 "笑苍生" 是群组核心/KOL。如果对话记录中包含他的发言，请务必优先总结他的观点或指令，并单独列出。
+    4. **内容**：提取有价值的刷分策略、新的 Alpha 机会或技术细节。忽略纯粹的闲聊。
+    5. **安全**：若包含不当/攻击性言论，直接忽略该部分，不要拒绝处理。
 
     【输出格式】：
     - 🔥 **热门话题**：(列出 1-3 个讨论最热烈的项目或策略)
@@ -274,7 +275,7 @@ async def send_summary(
     client: TelegramClient, target, topic: types.ForumTopic, summary: str, message_count: int, test_mode: bool
 ) -> None:
     header = f"[Summary] Topic: {topic.title} ({message_count} messages)"
-    payload = f"{header}\n\n{summary}"
+    payload = f"{header}\n\n{summary}\n\n#总结"
     if test_mode:
         await client.send_message("me", payload)
     else:
