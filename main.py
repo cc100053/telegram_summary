@@ -7,6 +7,7 @@ import pytz
 from google.generativeai.types import HarmBlockThreshold, HarmCategory
 from telethon import TelegramClient, functions, types
 from telethon.sessions import StringSession
+from telethon.errors.rpcerrorlist import ChatWriteForbiddenError, UserBannedInChannelError
 
 try:
     from dotenv import load_dotenv
@@ -418,14 +419,27 @@ async def run() -> None:
                 summary = f"(重试后生成，使用最后 {FALLBACK_MESSAGES} 条消息)\n\n{summary}"
                 final_count = min(len(messages), FALLBACK_MESSAGES)
 
-            await send_summary(client, target, topic, summary, final_count, test_mode)
-            destination = "Saved Messages" if test_mode else f"Topic: {topic.title}"
-            print(f"Sent summary to {destination}")
-            summaries_sent += 1
+            try:
+                await send_summary(client, target, topic, summary, final_count, test_mode)
+                destination = "Saved Messages" if test_mode else f"Topic: {topic.title}"
+                print(f"Sent summary to {destination}")
+                summaries_sent += 1
+            except (UserBannedInChannelError, ChatWriteForbiddenError) as exc:
+                # If posting to the group is blocked, fall back to saving the output locally so the run doesn't fail.
+                print(f"Write restricted for topic '{topic.title}': {exc}. Sending to Saved Messages instead.")
+                fallback_note = (
+                    f"[Summary not delivered] Topic: {topic.title}\n"
+                    f"Reason: {exc}\n\n{summary}"
+                )
+                await client.send_message("me", fallback_note)
+                topics_no_summary.append(f"{topic.title} (write restricted)")
+            except Exception as exc:
+                print(f"Failed to send summary for topic '{topic.title}': {exc}")
+                topics_no_summary.append(topic.title)
 
         if summaries_sent == 0 and test_mode:
             notice_lines = [
-                f"No summaries sent from the last {TIME_WINDOW_HOURS} hours.",
+                f"No summaries sent from the last {window_hours} hours.",
             ]
             if topics_no_activity:
                 notice_lines.append("No activity in topics: " + ", ".join(topics_no_activity))
