@@ -292,8 +292,9 @@ async def run_summary_with_retry(
                 return summary, feedback
             
             # If blocked by safety settings, retrying the same content usually won't help
+            # but user requested to max out retries anyway.
             if feedback and "prompt_blocked" in feedback:
-                return summary, feedback
+                print(f"  > Blocked (attempt {attempt+1}), retrying...")
                 
         except Exception as exc:
             print(f"  > Attempt {attempt+1}/{max_retries} failed for '{topic_title}': {exc}")
@@ -364,7 +365,7 @@ async def run() -> None:
 
             print(f"Topic '{topic.title}': {len(messages)} messages in window")
             
-            CHUNK_SIZE = 1000
+            CHUNK_SIZE = 600
             summary = ""
             feedback = None
             retried = False
@@ -383,6 +384,7 @@ async def run() -> None:
                         partial_summaries.append(chunk_summary)
                     else:
                         print(f"  > Chunk {i//CHUNK_SIZE + 1} failed: {chunk_feedback}")
+                        partial_summaries.append(f"(Chunk {i//CHUNK_SIZE + 1} was skipped due to safety filters)")
 
                 if partial_summaries:
                     print("  > Generating final summary from partial summaries...")
