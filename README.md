@@ -57,7 +57,7 @@ git push -u origin main
 ## GitHub Actions
 - Workflow: `.github/workflows/summary.yml`
 - **Schedule**: Runs at 07:00, 10:30, 14:00, 17:30, 21:00, 00:30 (HKT).
-- Set repository secrets: `TG_API_ID`, `TG_API_HASH`, `TG_SESSION_STRING`, `GEMINI_API_KEY`, `TARGET_GROUP`, optional `TEST_MODE`, `TOPIC_FILTER`.
+- Set repository secrets: `TG_API_ID`, `TG_API_HASH`, `TG_SESSION_STRING`, `GEMINI_API_KEYS` (comma-separated for rotation) or `GEMINI_API_KEY` (single key), `TARGET_GROUP`, optional `TEST_MODE`, `TOPIC_FILTER`.
 
 ## Notes
 - **Timezone**: Asia/Hong_Kong.
