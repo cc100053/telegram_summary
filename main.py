@@ -233,6 +233,7 @@ def get_ai_summary(
     - 🔥 **热门话题**：(列出 1-3 个讨论最热烈的项目或策略)
     - 🗣️ **笑苍生说**：(如果有他的发言，请单独列出；如果没有，则不显示此项)
     - 📝 **重点摘要**：(条列式总结技术细节或结论)
+    - 列表符号统一使用 “-”，不要使用 “*”
     - 时间范围：请在开头注明「{timeframe_label}」
 
     对话内容：
@@ -283,7 +284,7 @@ async def send_summary(
     client: TelegramClient, target, topic: types.ForumTopic, summary: str, message_count: int, test_mode: bool
 ) -> None:
     header = f"[Summary] Topic: {topic.title} ({message_count} messages)"
-    payload = f"{header}\n\n{summary}"
+    payload = f"{header}\n\n{summary}\n\n#总结"
     if test_mode:
         await client.send_message("me", payload)
     else:
@@ -431,6 +432,8 @@ async def run() -> None:
                     print(f"No summary generated for topic '{topic.title}'.")
                 topics_no_summary.append(topic.title)
                 continue
+
+            summary = summary.rstrip() + "\n\n#总结"
 
             final_count = len(messages)
             if retried:
