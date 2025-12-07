@@ -22,7 +22,6 @@ HK_TZ = pytz.timezone("Asia/Hong_Kong")
 TOPIC_LIMIT = 50
 MAX_MESSAGES_PER_TOPIC = 5000
 FALLBACK_MESSAGES = 500
-TOPIC_FILTER = os.getenv("TOPIC_FILTER")
 
 SAFETY_SETTINGS = [
     {"category": HarmCategory.HARM_CATEGORY_HARASSMENT, "threshold": HarmBlockThreshold.BLOCK_NONE},
@@ -270,6 +269,16 @@ def run_summary(
     return get_ai_summary(model, topic_title, text_data, timeframe_label)
 
 
+def build_model(api_key: str) -> genai.GenerativeModel:
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel(
+        model_name="gemini-flash-latest",
+        safety_settings=SAFETY_SETTINGS,
+        system_instruction=SYSTEM_INSTRUCTION,
+        generation_config={"temperature": 0.3},
+    )
+
+
 async def send_summary(
     client: TelegramClient, target, topic: types.ForumTopic, summary: str, message_count: int, test_mode: bool
 ) -> None:
@@ -311,17 +320,19 @@ async def run() -> None:
     api_id = int(require_env("TG_API_ID"))
     api_hash = require_env("TG_API_HASH")
     session_string = require_env("TG_SESSION_STRING")
-    gemini_api_key = require_env("GEMINI_API_KEY")
+    raw_keys = os.getenv("GEMINI_API_KEYS")
+    gemini_api_keys = [k.strip() for k in raw_keys.split(",")] if raw_keys else []
+    gemini_api_keys = [k for k in gemini_api_keys if k]
+    if not gemini_api_keys:
+        single_key = os.getenv("GEMINI_API_KEY")
+        if single_key and single_key.strip():
+            gemini_api_keys = [single_key.strip()]
+    if not gemini_api_keys:
+        raise RuntimeError("Environment variable GEMINI_API_KEYS (or GEMINI_API_KEY) is required.")
     target_group = parse_target_group(require_env("TARGET_GROUP"))
     test_mode = parse_bool(os.getenv("TEST_MODE"), default=True)
-
-    genai.configure(api_key=gemini_api_key)
-    model = genai.GenerativeModel(
-        model_name="gemini-flash-latest",
-        safety_settings=SAFETY_SETTINGS,
-        system_instruction=SYSTEM_INSTRUCTION,
-        generation_config={"temperature": 0.3},
-    )
+    topic_filter = os.getenv("TOPIC_FILTER")
+    ignored_topics = [t.strip() for t in (os.getenv("IGNORED_TOPICS") or "").split(",") if t.strip()]
 
     window_hours = get_dynamic_window_hours()
     print(f"Dynamic time window: {window_hours} hours")
@@ -339,10 +350,10 @@ async def run() -> None:
         target = await client.get_entity(target_group)
         topics = await fetch_topics(client, target)
 
-        if TOPIC_FILTER:
-            topics = [t for t in topics if TOPIC_FILTER in (t.title or "")]
+        if topic_filter:
+            topics = [t for t in topics if topic_filter in (t.title or "")]
             if not topics:
-                print(f"No topics matched filter '{TOPIC_FILTER}'.")
+                print(f"No topics matched filter '{topic_filter}'.")
                 return
 
         if not topics:
@@ -355,7 +366,14 @@ async def run() -> None:
         topics_no_activity: list[str] = []
         topics_no_summary: list[str] = []
 
-        for topic in topics:
+        for idx, topic in enumerate(topics):
+            if topic.title in ignored_topics:
+                print(f"Skipping ignored topic: {topic.title}")
+                continue
+
+            api_key = gemini_api_keys[idx % len(gemini_api_keys)]
+            model = build_model(api_key)
+
             messages, truncated = await fetch_messages_for_topic(client, target, topic, cutoff_utc)
             if not messages:
                 topics_no_activity.append(topic.title)
