@@ -284,7 +284,8 @@ async def send_summary(
     client: TelegramClient, target, topic: types.ForumTopic, summary: str, message_count: int, test_mode: bool
 ) -> None:
     header = f"[Summary] Topic: {topic.title} ({message_count} messages)"
-    payload = f"{header}\n\n{summary}"
+    disclaimer = "⚠️ AI有幻觉，总结只作参考"
+    payload = f"{header}\n{disclaimer}\n\n{summary}"
     if test_mode:
         await client.send_message("me", payload)
     else:
