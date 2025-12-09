@@ -21,6 +21,8 @@ INTERVAL_HOURS = 4  # Keep for prompt context, or update dynamically if needed?
 HK_TZ = pytz.timezone("Asia/Hong_Kong")
 TOPIC_LIMIT = 50
 MAX_MESSAGES_PER_TOPIC = 5000
+CHUNK_SIZE = 1000  # Messages per chunk for large topics
+CHUNK_DELAY_SECONDS = 5  # Short delay between API calls
 FALLBACK_MESSAGES = 500
 
 SAFETY_SETTINGS = [
@@ -383,30 +385,47 @@ async def run() -> None:
 
             print(f"Topic '{topic.title}': {len(messages)} messages in window")
             
-            CHUNK_SIZE = 1000
             summary = ""
             feedback = None
             retried = False
 
             if len(messages) > CHUNK_SIZE:
-                print(f"  > Large topic ({len(messages)} msgs). Splitting into chunks of {CHUNK_SIZE}...")
+                total_chunks = (len(messages) + CHUNK_SIZE - 1) // CHUNK_SIZE
+                print(f"  > Large topic ({len(messages)} msgs). Splitting into {total_chunks} chunks of {CHUNK_SIZE}...")
                 partial_summaries = []
                 
                 for i in range(0, len(messages), CHUNK_SIZE):
+                    chunk_num = i // CHUNK_SIZE + 1
                     chunk = messages[i : i + CHUNK_SIZE]
-                    print(f"  > Processing chunk {i//CHUNK_SIZE + 1} ({len(chunk)} messages)...")
+                    
+                    # Rotate API key per chunk to distribute load
+                    chunk_api_key = gemini_api_keys[chunk_num % len(gemini_api_keys)]
+                    chunk_model = build_model(chunk_api_key)
+                    key_index = chunk_num % len(gemini_api_keys) + 1
+                    
+                    # Short delay between chunks (except for first)
+                    if i > 0:
+                        print(f"  > Waiting {CHUNK_DELAY_SECONDS}s...")
+                        await asyncio.sleep(CHUNK_DELAY_SECONDS)
+                    
+                    print(f"  > Processing chunk {chunk_num}/{total_chunks} ({len(chunk)} messages) [API key {key_index}]...")
                     chunk_text = format_messages(chunk, truncated=False, timeframe_label=timeframe_label)
                     
-                    chunk_summary, chunk_feedback = await run_summary_with_retry(model, topic.title, chunk_text, timeframe_label)
+                    chunk_summary, chunk_feedback = await run_summary_with_retry(chunk_model, topic.title, chunk_text, timeframe_label)
                     if chunk_summary:
                         partial_summaries.append(chunk_summary)
                     else:
-                        print(f"  > Chunk {i//CHUNK_SIZE + 1} failed: {chunk_feedback}")
+                        print(f"  > Chunk {chunk_num}/{total_chunks} failed: {chunk_feedback}")
 
                 if partial_summaries:
+                    print(f"  > Waiting {CHUNK_DELAY_SECONDS}s before final summary...")
+                    await asyncio.sleep(CHUNK_DELAY_SECONDS)
+                    # Use a different key for final summary
+                    final_api_key = gemini_api_keys[(len(partial_summaries) + 1) % len(gemini_api_keys)]
+                    final_model = build_model(final_api_key)
                     print("  > Generating final summary from partial summaries...")
                     combined_text = "\n\n".join(partial_summaries)
-                    summary, feedback = await run_summary_with_retry(model, topic.title, combined_text, timeframe_label)
+                    summary, feedback = await run_summary_with_retry(final_model, topic.title, combined_text, timeframe_label)
                 else:
                     print("  > No partial summaries generated.")
             else:
