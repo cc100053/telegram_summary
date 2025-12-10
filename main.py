@@ -337,6 +337,8 @@ async def run() -> None:
     test_mode = parse_bool(os.getenv("TEST_MODE"), default=True)
     topic_filter = os.getenv("TOPIC_FILTER")
     ignored_topics = [t.strip() for t in (os.getenv("IGNORED_TOPICS") or "").split(",") if t.strip()]
+    if ignored_topics:
+        print(f"Ignored topics: {ignored_topics}")
 
     window_hours = get_dynamic_window_hours()
     print(f"Dynamic time window: {window_hours} hours")

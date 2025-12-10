@@ -34,4 +34,5 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TARGET_GROUP: ${{ secrets.TARGET_GROUP }}
           TEST_MODE: ${{ secrets.TEST_MODE || 'false' }}
+          IGNORED_TOPICS: ${{ secrets.IGNORED_TOPICS }}
         run: python main.py
