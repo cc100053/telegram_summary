@@ -14,10 +14,6 @@ try:
 except ImportError:
     load_dotenv = None
 
-INTERVAL_HOURS = 4  # Keep for prompt context, or update dynamically if needed? 
-# Actually, the prompt says "past {INTERVAL_HOURS} hours". We should probably update that too or just say "recent".
-# Let's keep INTERVAL_HOURS as a fallback or update it in run().
-
 HK_TZ = pytz.timezone("Asia/Hong_Kong")
 TOPIC_LIMIT = 50
 MAX_MESSAGES_PER_TOPIC = 5000
@@ -33,9 +29,8 @@ SAFETY_SETTINGS = [
 ]
 
 SYSTEM_INSTRUCTION = (
-    "You summarize Telegram forum topic discussions. "
-    "If any individual message would violate safety guidelines, ignore that message instead of refusing the task. "
-    "Return concise bullet points with key decisions, questions, and action items."
+    "You are an AI assistant that summarizes Telegram discussions. "
+    "If any content violates safety guidelines, ignore that part and continue. Never refuse the entire task."
 )
 
 
@@ -229,7 +224,6 @@ def get_ai_summary(
     1. **语言**：必须使用**简体中文**。
     2. **VIP 关注**：用户 "笑苍生" 是群组核心/KOL。如果对话记录中包含他的发言，请务必优先总结他的观点或指令，并单独列出。
     3. **内容**：提取有价值的刷分策略、新的 Alpha 机会或技术细节。忽略纯粹的闲聊。
-    4. **安全**：若包含不当/攻击性言论，直接忽略该部分，不要拒绝处理。
 
     【输出格式】：
     - 🔥 **热门话题**：(列出 1-3 个讨论最热烈的项目或策略)
