@@ -282,10 +282,20 @@ async def send_summary(
     header = f"[Summary] Topic: {topic.title} ({message_count} messages)"
     disclaimer = "⚠️ AI有幻觉，总结只作参考"
     payload = f"{header}\n{disclaimer}\n\n{summary}"
+    
+    # Debug logging
+    print(f"  [DEBUG] send_summary called:")
+    print(f"    - test_mode: {test_mode}")
+    print(f"    - target: {target} (type: {type(target).__name__})")
+    print(f"    - topic.id: {topic.id}, topic.top_message: {topic.top_message}")
+    print(f"    - payload length: {len(payload)} chars")
+    
     if test_mode:
-        await client.send_message("me", payload)
+        result = await client.send_message("me", payload)
+        print(f"    - Sent to Saved Messages, msg_id: {result.id}")
     else:
-        await client.send_message(target, payload, reply_to=topic.top_message)
+        result = await client.send_message(target, payload, reply_to=topic.top_message)
+        print(f"    - Sent to topic, msg_id: {result.id}")
 
 
 async def run_summary_with_retry(
@@ -329,6 +339,12 @@ async def run() -> None:
         raise RuntimeError("Environment variable GEMINI_API_KEYS (or GEMINI_API_KEY) is required.")
     target_group = parse_target_group(require_env("TARGET_GROUP"))
     test_mode = parse_bool(os.getenv("TEST_MODE"), default=True)
+    
+    # Debug: Show parsed config
+    print(f"[DEBUG] Configuration:")
+    print(f"  - TARGET_GROUP: {target_group}")
+    print(f"  - TEST_MODE: {test_mode} (raw env: '{os.getenv('TEST_MODE')}')")
+    
     topic_filter = os.getenv("TOPIC_FILTER")
     ignored_topics = [t.strip() for t in (os.getenv("IGNORED_TOPICS") or "").split(",") if t.strip()]
     if ignored_topics:
