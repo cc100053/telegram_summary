@@ -2,9 +2,9 @@ import asyncio
 import os
 from datetime import datetime, timedelta
 
-import google.generativeai as genai
 import pytz
-from google.generativeai.types import HarmBlockThreshold, HarmCategory
+from google import genai
+from google.genai import types as genai_types
 from telethon import TelegramClient, functions, types
 from telethon.sessions import StringSession
 from telethon.errors.rpcerrorlist import ChatWriteForbiddenError, UserBannedInChannelError
@@ -22,10 +22,22 @@ CHUNK_DELAY_SECONDS = 5  # Short delay between API calls
 FALLBACK_MESSAGES = 500
 
 SAFETY_SETTINGS = [
-    {"category": HarmCategory.HARM_CATEGORY_HARASSMENT, "threshold": HarmBlockThreshold.BLOCK_NONE},
-    {"category": HarmCategory.HARM_CATEGORY_HATE_SPEECH, "threshold": HarmBlockThreshold.BLOCK_NONE},
-    {"category": HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, "threshold": HarmBlockThreshold.BLOCK_NONE},
-    {"category": HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, "threshold": HarmBlockThreshold.BLOCK_NONE},
+    genai_types.SafetySetting(
+        category="HARM_CATEGORY_HARASSMENT",
+        threshold="OFF",
+    ),
+    genai_types.SafetySetting(
+        category="HARM_CATEGORY_HATE_SPEECH",
+        threshold="OFF",
+    ),
+    genai_types.SafetySetting(
+        category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
+        threshold="OFF",
+    ),
+    genai_types.SafetySetting(
+        category="HARM_CATEGORY_DANGEROUS_CONTENT",
+        threshold="OFF",
+    ),
 ]
 
 SYSTEM_INSTRUCTION = (
@@ -208,7 +220,7 @@ def format_messages(messages: list[dict], truncated: bool, timeframe_label: str)
 
 
 def get_ai_summary(
-    model: genai.GenerativeModel, topic_name: str, text_data: str, timeframe_label: str
+    client: genai.Client, topic_name: str, text_data: str, timeframe_label: str
 ) -> tuple[str, str | None]:
     # Extract hours from label or just say "recent"
     prompt = f"""
@@ -236,44 +248,61 @@ def get_ai_summary(
     {text_data}
     """
 
-    response = model.generate_content(prompt)
+    try:
+        response = client.models.generate_content(
+            model="gemini-flash-latest",
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                safety_settings=SAFETY_SETTINGS,
+                temperature=0.3,
+            ),
+        )
+    except Exception as exc:
+        return "", f"api_error: {exc}"
+
     feedback = None
 
+    # Check for blocked prompt
+    if hasattr(response, "prompt_feedback") and response.prompt_feedback:
+        pf = response.prompt_feedback
+        if hasattr(pf, "block_reason") and pf.block_reason:
+            return "", f"prompt_blocked: {pf.block_reason}"
+
+    # Extract text from response (new SDK has .text property)
+    if hasattr(response, "text") and response.text:
+        return response.text.strip(), None
+
+    # Fallback: try candidates
     candidates = getattr(response, "candidates", []) or []
     if not candidates:
-        pf = getattr(response, "prompt_feedback", None)
-        if pf and getattr(pf, "block_reason", None):
-            feedback = f"prompt_blocked: {pf.block_reason}"
-        return "", feedback
+        return "", "no_candidates"
 
     cand = candidates[0]
     finish_reason = getattr(cand, "finish_reason", None)
-    parts = getattr(getattr(cand, "content", None), "parts", None) or []
-    text_parts = [getattr(p, "text", "") for p in parts if getattr(p, "text", "")]
-    summary_text = "\n".join(text_parts).strip()
+    
+    # Try to get text from content parts
+    content = getattr(cand, "content", None)
+    if content:
+        parts = getattr(content, "parts", None) or []
+        text_parts = [getattr(p, "text", "") for p in parts if getattr(p, "text", "")]
+        summary_text = "\n".join(text_parts).strip()
+        if summary_text:
+            return summary_text, None
 
-    if not summary_text:
-        if finish_reason is not None:
-            feedback = f"finish_reason={finish_reason}"
-        return "", feedback
-
-    return summary_text, None
+    if finish_reason is not None:
+        feedback = f"finish_reason={finish_reason}"
+    return "", feedback
 
 
 def run_summary(
-    model: genai.GenerativeModel, topic_title: str, text_data: str, timeframe_label: str
+    client: genai.Client, topic_title: str, text_data: str, timeframe_label: str
 ) -> tuple[str, str | None]:
-    return get_ai_summary(model, topic_title, text_data, timeframe_label)
+    return get_ai_summary(client, topic_title, text_data, timeframe_label)
 
 
-def build_model(api_key: str) -> genai.GenerativeModel:
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel(
-        model_name="gemini-flash-latest",
-        safety_settings=SAFETY_SETTINGS,
-        system_instruction=SYSTEM_INSTRUCTION,
-        generation_config={"temperature": 0.3},
-    )
+def build_client(api_key: str) -> genai.Client:
+    return genai.Client(api_key=api_key)
 
 
 async def send_summary(
@@ -299,17 +328,26 @@ async def send_summary(
 
 
 async def run_summary_with_retry(
-    model: genai.GenerativeModel, topic_title: str, text_data: str, timeframe_label: str, max_retries: int = 3
+    ai_client: genai.Client, topic_title: str, text_data: str, timeframe_label: str, max_retries: int = 3
 ) -> tuple[str, str | None]:
     for attempt in range(max_retries):
         try:
-            summary, feedback = run_summary(model, topic_title, text_data, timeframe_label)
+            summary, feedback = run_summary(ai_client, topic_title, text_data, timeframe_label)
             if summary:
                 return summary, feedback
+            
+            # Log the feedback for debugging
+            print(f"  > Attempt {attempt+1}/{max_retries}: no summary returned, feedback: {feedback}")
             
             # If blocked by safety settings, retrying the same content usually won't help
             if feedback and "prompt_blocked" in feedback:
                 return summary, feedback
+            
+            # If API error, wait and retry
+            if feedback and "api_error" in feedback:
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 * (attempt + 1))
+                continue
                 
         except Exception as exc:
             print(f"  > Attempt {attempt+1}/{max_retries} failed for '{topic_title}': {exc}")
@@ -388,7 +426,7 @@ async def run() -> None:
                 continue
 
             api_key = gemini_api_keys[idx % len(gemini_api_keys)]
-            model = build_model(api_key)
+            ai_client = build_client(api_key)
 
             messages, truncated = await fetch_messages_for_topic(client, target, topic, cutoff_utc)
             if not messages:
@@ -412,7 +450,7 @@ async def run() -> None:
                     
                     # Rotate API key per chunk to distribute load
                     chunk_api_key = gemini_api_keys[chunk_num % len(gemini_api_keys)]
-                    chunk_model = build_model(chunk_api_key)
+                    chunk_client = build_client(chunk_api_key)
                     key_index = chunk_num % len(gemini_api_keys) + 1
                     
                     # Short delay between chunks (except for first)
@@ -423,7 +461,7 @@ async def run() -> None:
                     print(f"  > Processing chunk {chunk_num}/{total_chunks} ({len(chunk)} messages) [API key {key_index}]...")
                     chunk_text = format_messages(chunk, truncated=False, timeframe_label=timeframe_label)
                     
-                    chunk_summary, chunk_feedback = await run_summary_with_retry(chunk_model, topic.title, chunk_text, timeframe_label)
+                    chunk_summary, chunk_feedback = await run_summary_with_retry(chunk_client, topic.title, chunk_text, timeframe_label)
                     if chunk_summary:
                         partial_summaries.append(chunk_summary)
                     else:
@@ -434,16 +472,16 @@ async def run() -> None:
                     await asyncio.sleep(CHUNK_DELAY_SECONDS)
                     # Use a different key for final summary
                     final_api_key = gemini_api_keys[(len(partial_summaries) + 1) % len(gemini_api_keys)]
-                    final_model = build_model(final_api_key)
+                    final_client = build_client(final_api_key)
                     print("  > Generating final summary from partial summaries...")
                     combined_text = "\n\n".join(partial_summaries)
-                    summary, feedback = await run_summary_with_retry(final_model, topic.title, combined_text, timeframe_label)
+                    summary, feedback = await run_summary_with_retry(final_client, topic.title, combined_text, timeframe_label)
                 else:
                     print("  > No partial summaries generated.")
             else:
                 # Standard processing for smaller topics
                 text_data = format_messages(messages, truncated, timeframe_label)
-                summary, feedback = await run_summary_with_retry(model, topic.title, text_data, timeframe_label)
+                summary, feedback = await run_summary_with_retry(ai_client, topic.title, text_data, timeframe_label)
 
             if not summary:
                 retried = False
@@ -452,7 +490,7 @@ async def run() -> None:
                     fallback_msgs = messages[-FALLBACK_MESSAGES:]
                     fallback_text = format_messages(fallback_msgs, truncated=True, timeframe_label=timeframe_label)
                     print(f"Retrying topic '{topic.title}' with last {FALLBACK_MESSAGES} messages due to block/error.")
-                    summary, feedback = await run_summary_with_retry(model, topic.title, fallback_text, timeframe_label)
+                    summary, feedback = await run_summary_with_retry(ai_client, topic.title, fallback_text, timeframe_label)
                     if summary:
                         retried = True
 
