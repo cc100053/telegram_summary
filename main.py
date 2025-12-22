@@ -70,16 +70,32 @@ def parse_target_group(raw: str):
     return stripped
 
 
-def get_dynamic_window_hours() -> float:
+def get_cutoff_time() -> datetime:
     """
-    Returns 6.0 hours if running between 06:00 and 08:00 HK time (morning run).
-    Otherwise returns 3.5 hours.
+    Get the cutoff time for fetching messages.
+    Priority:
+    1. Use LAST_RUN_TIMESTAMP from env (set by GitHub Actions cache)
+    2. Fallback to dynamic window calculation
     """
+    last_run = os.getenv("LAST_RUN_TIMESTAMP")
+    if last_run:
+        try:
+            # Parse ISO format timestamp from GitHub Actions
+            cutoff = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
+            print(f"Using cached last run time: {cutoff}")
+            return cutoff
+        except ValueError:
+            print(f"Warning: Could not parse LAST_RUN_TIMESTAMP: {last_run}")
+    
+    # Fallback to dynamic window
     now_hk = datetime.now(HK_TZ)
-    # If running between 06:00 and 07:59, assume it's the "morning summary" covering the night.
     if 6 <= now_hk.hour < 8:
-        return 6.0
-    return 3.5
+        window_hours = 6.0  # Morning run covers night
+    else:
+        window_hours = 3.5
+    
+    print(f"Using dynamic window: {window_hours} hours")
+    return datetime.now(tz=pytz.UTC) - timedelta(hours=window_hours)
 
 
 async def fetch_topics(client: TelegramClient, target) -> list[types.ForumTopic]:
@@ -180,6 +196,10 @@ async def fetch_messages_for_topic(
 
                 text = (getattr(message, "message", "") or "").strip()
                 if not text:
+                    continue
+
+                # Skip previous bot summaries to avoid feedback loops
+                if "[Summary]" in text or "#总结" in text:
                     continue
 
                 collected.append(
@@ -424,10 +444,7 @@ async def run() -> None:
     if ignored_topics:
         print(f"Ignored topics: {ignored_topics}")
 
-    window_hours = get_dynamic_window_hours()
-    print(f"Dynamic time window: {window_hours} hours")
-
-    cutoff_utc = datetime.now(tz=pytz.UTC) - timedelta(hours=window_hours)
+    cutoff_utc = get_cutoff_time()
     timeframe_label = (
         f"{cutoff_utc.astimezone(HK_TZ).strftime('%m/%d %H:%M')} - "
         f"{datetime.now(tz=pytz.UTC).astimezone(HK_TZ).strftime('%m/%d %H:%M')} (Asia/Hong_Kong)"

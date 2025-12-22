@@ -25,6 +25,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # Restore last run timestamp from cache
+      - name: Restore last run timestamp
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .last_run_timestamp
+          key: last-run-timestamp-${{ github.run_id }}
+          restore-keys: |
+            last-run-timestamp-
+
+      - name: Read last run timestamp
+        id: last-run
+        run: |
+          if [ -f .last_run_timestamp ]; then
+            echo "timestamp=$(cat .last_run_timestamp)" >> $GITHUB_OUTPUT
+          else
+            echo "timestamp=" >> $GITHUB_OUTPUT
+          fi
+
       - name: Run summarizer
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
@@ -35,4 +54,15 @@ jobs:
           TARGET_GROUP: ${{ secrets.TARGET_GROUP }}
           TEST_MODE: ${{ secrets.TEST_MODE || 'false' }}
           IGNORED_TOPICS: ${{ secrets.IGNORED_TOPICS }}
+          LAST_RUN_TIMESTAMP: ${{ steps.last-run.outputs.timestamp }}
         run: python main.py
+
+      # Save current timestamp for next run
+      - name: Save current timestamp
+        run: date -u +"%Y-%m-%dT%H:%M:%SZ" > .last_run_timestamp
+
+      - name: Cache current timestamp
+        uses: actions/cache/save@v4
+        with:
+          path: .last_run_timestamp
+          key: last-run-timestamp-${{ github.run_id }}
