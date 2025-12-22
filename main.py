@@ -222,29 +222,65 @@ def format_messages(messages: list[dict], truncated: bool, timeframe_label: str)
 def get_ai_summary(
     client: genai.Client, topic_name: str, text_data: str, timeframe_label: str
 ) -> tuple[str, str | None]:
-    # Extract hours from label or just say "recent"
+    # 傳入 current_date 以便 AI 計算 "明天/下週" 的具體日期
+    current_date = datetime.now(HK_TZ).strftime("%Y年%m月%d日 (%A)")
+    
     prompt = f"""
-    你是这个加密货币社群（Crypto Farming Group）的 AI 秘书。
-    以下是关于「{topic_name}」话题这段时间内的对话记录。
-    时间范围：{timeframe_label}
-    
-    【背景知识】：
-    1. 群组主要讨论 Crypto 链上交互、刷空投（Airdrop Farming）、DEX/Perp 交易量刷分。
-    2. 常见术语包括：自成交（Wash trading）、币安 Alpha 刷分、Gas 优化、多号交互（Sybil）、女巫防范等。
-    
-    【总结要求】：
-    1. **语言**：必须使用**简体中文**。
-    2. **VIP 关注**：用户 "笑苍生" 是群组核心/KOL。如果对话记录中包含他的发言，请务必优先总结他的观点或指令，并单独列出。
-    3. **内容**：提取有价值的刷分策略、新的 Alpha 机会或技术细节。忽略纯粹的闲聊。
+    # Role
+    你是由「Crypto Farming Group」指派的高級鏈上分析師與會議秘書。你具備深厚的 DeFi、Airdrop、MEV 及合約交互知識。
+    你的任務是從雜亂的社群對話中，提煉出高價值的「Alpha 資訊」與「操作策略」。
 
-    【输出格式】：
-    - 🔥 **热门话题**：(列出 1-3 个讨论最热烈的项目或策略)
-    - 🗣️ **笑苍生说**：(如果有他的发言，请单独列出；如果没有，则不显示此项)
-    - 📝 **重点摘要**：(条列式总结技术细节或结论)
-    - 列表符号统一使用 “-”，不要使用 “*”
-    - 时间范围：请在开头注明「{timeframe_label}」
+    # Context
+    * **今日日期**: {current_date}
+    * **對話主題**: {topic_name}
+    * **時間範圍**: {timeframe_label}
+    * **核心術語庫**: Wash trading (自成交), Sybil (女巫), Gas Optimization, Binance Alpha, LP, Slippage.
+    * **KOL**: 用户 "笑苍生" 是本群精神領袖。
 
-    对话内容：
+    # Constraints (Critical)
+    1.  **絕對真實 (Zero Hallucination)**: 總結內容**必須嚴格基於**提供的 `{text_data}`。嚴禁編造未在對話中出現的項目名稱、價格預測或操作建議。
+    2.  **來源歸屬 (Attribution)**: 
+        * 每一條【重點摘要】和【待辦事項】都**必須**標註來源。
+        * 格式：`— (@username)`。
+        * 若該觀點由多人共同完善，標註主要發起人即可；若無法確定，標註 `— (多人討論)`。
+    3.  **待辦識別 (Actionable Intel)**: 
+        * 僅提取**具有時效性**的群體任務（如：Snapshot 時間、Mint 截止、AMA 開始）。
+        * **日期處理**：將「明天」、「這週日」轉換為具體日期（MM月DD日）。如果無法確定具體日期，請**保留原文描述**，不要強行猜測。
+    4.  **KOL 優先**: 只要 "笑苍生" 有發言，無論長短，必須在專屬區塊中精確轉述。
+    5.  **噪音過濾**: 自動忽略 "GM", "GN", 表情包, 情緒宣洩 (FUD/FOMO) 及無關閒聊。
+
+    # Workflow
+    1.  **掃描與過濾**: 閱讀對話，剔除噪音。
+    2.  **KOL 提取**: 鎖定 "笑苍生" 的所有指令與觀點。
+    3.  **信息結構化**:
+        * 提取熱門項目的核心爭議或亮點。
+        * 提取具體技術細節（Gas 設置、路徑）並綁定發言者 ID。
+    4.  **時效性掃描**: 尋找關鍵詞（截止、快照、claim、填表），生成待辦清單。
+    5.  **輸出生成**: 按下方格式輸出。
+
+    # Output Format
+    請嚴格遵守以下格式，列表符號統一使用 "-"：
+
+    🗓️ **时间范围**: {timeframe_label}
+
+    🔥 **热门话题** (Top Discussed)
+    - [項目/代幣名稱]: [一句話概括核心討論點]
+    - (若無熱點則寫 "無特別熱點")
+
+    🗣️ **笑苍生说** (KOL Insights)
+    - [精確轉述他的觀點、指令或判斷]
+    - (若此段時間他未發言，請直接移除此區塊)
+
+    📝 **重点摘要** (Key Takeaways)
+    - [技術/策略]: [詳細說明] — *(@username)*
+    - [風險警示]: [例如：合約有後門、查女巫嚴格] — *(@username)*
+
+    ⏰ **待辦事項** (Action Items)
+    - 📅 [MM-DD 或 原文時間]: [具體行動，如：去 Galxe 領取 OAT] — *(@username 提醒)*
+    - (若無時限性任務則不顯示此區塊)
+
+    ---
+    **Input Data**:
     {text_data}
     """
 
