@@ -1,1 +1,0 @@
-Peak requests per minute and Peak requests per day of gemini have reached a rate limit, can I use 3-4 api key to separate the usage? 

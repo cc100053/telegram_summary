@@ -442,7 +442,10 @@ async def run() -> None:
     print(f"  - TEST_MODE: {test_mode} (raw env: '{os.getenv('TEST_MODE')}')")
     
     topic_filter = os.getenv("TOPIC_FILTER")
+    allowed_topics = [t.strip() for t in (os.getenv("ALLOWED_TOPICS") or "").split(",") if t.strip()]
     ignored_topics = [t.strip() for t in (os.getenv("IGNORED_TOPICS") or "").split(",") if t.strip()]
+    if allowed_topics:
+        print(f"Allowed topics: {allowed_topics}")
     if ignored_topics:
         print(f"Ignored topics: {ignored_topics}")
 
@@ -458,6 +461,12 @@ async def run() -> None:
 
         target = await client.get_entity(target_group)
         topics = await fetch_topics(client, target)
+
+        if allowed_topics:
+            topics = [t for t in topics if (t.title or "").strip() in allowed_topics]
+            if not topics:
+                print(f"No topics matched allowed list: {', '.join(allowed_topics)}.")
+                return
 
         if topic_filter:
             topics = [t for t in topics if topic_filter in (t.title or "")]
