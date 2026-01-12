@@ -98,19 +98,70 @@ def get_cutoff_time() -> datetime:
     return datetime.now(tz=pytz.UTC) - timedelta(hours=window_hours)
 
 
-async def fetch_topics(client: TelegramClient, target) -> list[types.ForumTopic]:
-    result = await client(
-        functions.messages.GetForumTopicsRequest(
-            peer=target,
-            offset_date=None,
-            offset_id=0,
-            offset_topic=0,
-            limit=TOPIC_LIMIT,
-            q=None,
+async def fetch_topics(client: TelegramClient, target) -> tuple[list[types.ForumTopic], int]:
+    topics: list[types.ForumTopic] = []
+    seen_topic_ids: set[int] = set()
+    offset_date = None
+    offset_id = 0
+    offset_topic = 0
+    total_count = 0
+
+    while True:
+        result = await client(
+            functions.messages.GetForumTopicsRequest(
+                peer=target,
+                offset_date=offset_date,
+                offset_id=offset_id,
+                offset_topic=offset_topic,
+                limit=TOPIC_LIMIT,
+                q=None,
+            )
         )
-    )
-    topics = result.topics or []
-    return [t for t in topics if isinstance(t, types.ForumTopic) and getattr(t, "top_message", None)]
+        if not total_count:
+            total_count = getattr(result, "count", 0) or 0
+
+        batch = [
+            t
+            for t in (result.topics or [])
+            if isinstance(t, types.ForumTopic) and getattr(t, "top_message", None)
+        ]
+        if not batch:
+            break
+
+        new_batch = []
+        for topic in batch:
+            if topic.id in seen_topic_ids:
+                continue
+            seen_topic_ids.add(topic.id)
+            new_batch.append(topic)
+
+        if not new_batch:
+            break
+
+        topics.extend(new_batch)
+
+        if total_count and len(topics) >= total_count:
+            break
+        if len(batch) < TOPIC_LIMIT:
+            break
+
+        last_topic = new_batch[-1]
+        offset_id = last_topic.top_message or 0
+        offset_topic = last_topic.id
+        offset_date = None
+        for message in getattr(result, "messages", []) or []:
+            if getattr(message, "id", None) == last_topic.top_message:
+                offset_date = getattr(message, "date", None)
+                break
+
+        if offset_id == 0 and offset_topic == 0:
+            break
+
+    return topics, total_count
+
+
+def can_speak_in_topic(topic: types.ForumTopic) -> bool:
+    return not getattr(topic, "closed", False)
 
 
 async def fetch_messages_for_topic(
@@ -442,10 +493,7 @@ async def run() -> None:
     print(f"  - TEST_MODE: {test_mode} (raw env: '{os.getenv('TEST_MODE')}')")
     
     topic_filter = os.getenv("TOPIC_FILTER")
-    allowed_topics = [t.strip() for t in (os.getenv("ALLOWED_TOPICS") or "").split(",") if t.strip()]
     ignored_topics = [t.strip() for t in (os.getenv("IGNORED_TOPICS") or "").split(",") if t.strip()]
-    if allowed_topics:
-        print(f"Allowed topics: {allowed_topics}")
     if ignored_topics:
         print(f"Ignored topics: {ignored_topics}")
 
@@ -460,13 +508,7 @@ async def run() -> None:
             raise RuntimeError("The provided session string is not authorized.")
 
         target = await client.get_entity(target_group)
-        topics = await fetch_topics(client, target)
-
-        if allowed_topics:
-            topics = [t for t in topics if (t.title or "").strip() in allowed_topics]
-            if not topics:
-                print(f"No topics matched allowed list: {', '.join(allowed_topics)}.")
-                return
+        topics, total_topic_count = await fetch_topics(client, target)
 
         if topic_filter:
             topics = [t for t in topics if topic_filter in (t.title or "")]
@@ -478,7 +520,8 @@ async def run() -> None:
             print("No forum topics found.")
             return
 
-        print(f"Found {len(topics)} topics. Processing recent messages...")
+        total_label = f"{total_topic_count}" if total_topic_count else "unknown"
+        print(f"Found {len(topics)} topics (total: {total_label}). Processing recent messages...")
 
         summaries_sent = 0
         topics_no_activity: list[str] = []
@@ -487,6 +530,9 @@ async def run() -> None:
         for idx, topic in enumerate(topics):
             if topic.title in ignored_topics:
                 print(f"Skipping ignored topic: {topic.title}")
+                continue
+            if not can_speak_in_topic(topic):
+                print(f"Skipping closed topic (no speaking permission): {topic.title}")
                 continue
 
             api_key = gemini_api_keys[idx % len(gemini_api_keys)]
