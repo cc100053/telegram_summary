@@ -40,6 +40,12 @@ SAFETY_SETTINGS = [
     ),
 ]
 
+MODELS_TO_TRY = [
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash",
+    "gemini-flash-latest",
+]
+
 SYSTEM_INSTRUCTION = (
     "You are an AI assistant that summarizes Telegram discussions. "
     "If any content violates safety guidelines, ignore that part and continue. Never refuse the entire task."
@@ -291,7 +297,7 @@ def format_messages(messages: list[dict], truncated: bool, timeframe_label: str)
 
 
 def get_ai_summary(
-    client: genai.Client, topic_name: str, text_data: str, timeframe_label: str
+    client: genai.Client, topic_name: str, text_data: str, timeframe_label: str, model_name: str
 ) -> tuple[str, str | None]:
     # 傳入 current_date 以便 AI 計算 "明天/下週" 的具體日期
     current_date = datetime.now(HK_TZ).strftime("%Y年%m月%d日 (%A)")
@@ -362,7 +368,7 @@ def get_ai_summary(
 
     try:
         response = client.models.generate_content(
-            model="gemini-flash-latest",
+            model=model_name,
             contents=prompt,
             config=genai_types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
@@ -408,9 +414,9 @@ def get_ai_summary(
 
 
 def run_summary(
-    client: genai.Client, topic_title: str, text_data: str, timeframe_label: str
+    client: genai.Client, topic_title: str, text_data: str, timeframe_label: str, model_name: str
 ) -> tuple[str, str | None]:
-    return get_ai_summary(client, topic_title, text_data, timeframe_label)
+    return get_ai_summary(client, topic_title, text_data, timeframe_label, model_name)
 
 
 def build_client(api_key: str) -> genai.Client:
@@ -442,33 +448,43 @@ async def send_summary(
 async def run_summary_with_retry(
     ai_client: genai.Client, topic_title: str, text_data: str, timeframe_label: str, max_retries: int = 3
 ) -> tuple[str, str | None]:
-    for attempt in range(max_retries):
-        try:
-            summary, feedback = run_summary(ai_client, topic_title, text_data, timeframe_label)
-            if summary:
-                return summary, feedback
-            
-            # Log the feedback for debugging
-            print(f"  > Attempt {attempt+1}/{max_retries}: no summary returned, feedback: {feedback}")
-            
-            # If blocked by safety settings, retrying the same content usually won't help
-            if feedback and "prompt_blocked" in feedback:
-                return summary, feedback
-            
-            # If API error, wait and retry
-            if feedback and "api_error" in feedback:
+    last_feedback = None
+    
+    for model_name in MODELS_TO_TRY:
+        print(f"  > [Model: {model_name}] Starting attempts...")
+        
+        for attempt in range(max_retries):
+            try:
+                summary, feedback = run_summary(ai_client, topic_title, text_data, timeframe_label, model_name)
+                if summary:
+                    return summary, feedback
+                
+                last_feedback = feedback
+                print(f"  > [Model: {model_name}] Attempt {attempt+1}/{max_retries}: no summary, feedback: {feedback}")
+                
+                # If prompt blocked, switching model *might* help if it involves model-specific safety filters,
+                # but usually it's content-based. Still, we try next model if retries fail.
+                if feedback and "prompt_blocked" in feedback:
+                    # Break inner loop to try next model immediately? 
+                    # Or retry? Usually block is deterministic. Let's break to next model.
+                    print(f"  > [Model: {model_name}] Prompt blocked. Switching to next model...")
+                    break
+                
+                # If API error, wait and retry SAME model
+                if feedback and "api_error" in feedback:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                    
+            except Exception as exc:
+                print(f"  > [Model: {model_name}] Attempt {attempt+1}/{max_retries} failed for '{topic_title}': {exc}")
+                last_feedback = f"exception: {exc}"
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 * (attempt + 1))
-                continue
-                
-        except Exception as exc:
-            print(f"  > Attempt {attempt+1}/{max_retries} failed for '{topic_title}': {exc}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(2 * (attempt + 1))
-            else:
-                return None, f"exception: {exc}"
-    
-    return None, "max_retries_exceeded"
+        
+        print(f"  > [Model: {model_name}] Failed or exhausted retries. Trying fallback if available...")
+
+    return None, f"all_models_failed: {last_feedback}"
 
 
 async def run() -> None:
