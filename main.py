@@ -446,6 +446,7 @@ async def send_summary(
 
 
 
+
 async def run_summary_with_retry(
     api_keys: list[str],
     start_key_index: int,
@@ -478,7 +479,8 @@ async def run_summary_with_retry(
                     client, topic_title, text_data, timeframe_label, model_name
                 )
                 if summary:
-                    return summary, feedback, current_key_idx
+                    # Success! Force rotation for next call (Round Robin)
+                    return summary, feedback, current_key_idx + 1
 
                 last_feedback = feedback
                 print(f"    - Failed: {feedback}")
@@ -488,7 +490,7 @@ async def run_summary_with_retry(
                     print(f"    - Prompt blocked. Skipping remaining retries for {model_name}.")
                     break  # Break attempt loop, move to next model (or stop if all blocked)
 
-                # SMART ROTATION: If API error/Quota, switch key immediately
+                # FALLBACK ROTATION: If API error/Quota, switch key immediately
                 if feedback and ("api_error" in feedback or "finish_reason" in feedback):
                     if len(api_keys) > 1:
                         print("    - API/Quota issue. Rotating to next key immediately.")
