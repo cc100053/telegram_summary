@@ -445,46 +445,74 @@ async def send_summary(
         print(f"    - Sent to topic, msg_id: {result.id}")
 
 
+
 async def run_summary_with_retry(
-    ai_client: genai.Client, topic_title: str, text_data: str, timeframe_label: str, max_retries: int = 3
-) -> tuple[str, str | None]:
+    api_keys: list[str],
+    start_key_index: int,
+    topic_title: str,
+    text_data: str,
+    timeframe_label: str,
+    max_retries: int = 3,
+) -> tuple[str, str | None, int]:
+    """
+    Attempts to generate a summary using multiple models and rotating keys.
+    Returns: (summary, feedback, next_key_index)
+    """
     last_feedback = None
-    
+    current_key_idx = start_key_index
+
     for model_name in MODELS_TO_TRY:
         print(f"  > [Model: {model_name}] Starting attempts...")
-        
+
         for attempt in range(max_retries):
+            # Rotate key potentially on every attempt if previous failed
+            api_key = api_keys[current_key_idx % len(api_keys)]
+            client = build_client(api_key)
+            
+            # Mask key for logging
+            masked_key = f"...{api_key[-4:]}" if len(api_key) > 4 else "std"
+            print(f"    - Attempt {attempt + 1}/{max_retries} using key {masked_key}")
+
             try:
-                summary, feedback = run_summary(ai_client, topic_title, text_data, timeframe_label, model_name)
+                summary, feedback = run_summary(
+                    client, topic_title, text_data, timeframe_label, model_name
+                )
                 if summary:
-                    return summary, feedback
-                
+                    return summary, feedback, current_key_idx
+
                 last_feedback = feedback
-                print(f"  > [Model: {model_name}] Attempt {attempt+1}/{max_retries}: no summary, feedback: {feedback}")
-                
-                # If prompt blocked, switching model *might* help if it involves model-specific safety filters,
-                # but usually it's content-based. Still, we try next model if retries fail.
+                print(f"    - Failed: {feedback}")
+
+                # FAIL FAST: Prompt blocked (safety) - do not retry this model
                 if feedback and "prompt_blocked" in feedback:
-                    # Break inner loop to try next model immediately? 
-                    # Or retry? Usually block is deterministic. Let's break to next model.
-                    print(f"  > [Model: {model_name}] Prompt blocked. Switching to next model...")
-                    break
-                
-                # If API error, wait and retry SAME model
-                if feedback and "api_error" in feedback:
+                    print(f"    - Prompt blocked. Skipping remaining retries for {model_name}.")
+                    break  # Break attempt loop, move to next model (or stop if all blocked)
+
+                # SMART ROTATION: If API error/Quota, switch key immediately
+                if feedback and ("api_error" in feedback or "finish_reason" in feedback):
+                    if len(api_keys) > 1:
+                        print("    - API/Quota issue. Rotating to next key immediately.")
+                        current_key_idx += 1
+                        continue  # Immediate retry with next key
+                    else:
+                        # Single key: must wait
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2 * (attempt + 1))
+                        continue
+
+            except Exception as exc:
+                print(f"    - Exception: {exc}")
+                last_feedback = f"exception: {exc}"
+                # Switch key on exception too? Yes, safest.
+                if len(api_keys) > 1:
+                    current_key_idx += 1
+                else:
                     if attempt < max_retries - 1:
                         await asyncio.sleep(2 * (attempt + 1))
-                    continue
-                    
-            except Exception as exc:
-                print(f"  > [Model: {model_name}] Attempt {attempt+1}/{max_retries} failed for '{topic_title}': {exc}")
-                last_feedback = f"exception: {exc}"
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2 * (attempt + 1))
-        
-        print(f"  > [Model: {model_name}] Failed or exhausted retries. Trying fallback if available...")
 
-    return None, f"all_models_failed: {last_feedback}"
+        print(f"  > [Model: {model_name}] Exhausted retries.")
+
+    return None, f"all_models_failed: {last_feedback}", current_key_idx
 
 
 async def run() -> None:
@@ -502,17 +530,22 @@ async def run() -> None:
         if single_key and single_key.strip():
             gemini_api_keys = [single_key.strip()]
     if not gemini_api_keys:
-        raise RuntimeError("Environment variable GEMINI_API_KEYS (or GEMINI_API_KEY) is required.")
+        raise RuntimeError(
+            "Environment variable GEMINI_API_KEYS (or GEMINI_API_KEY) is required."
+        )
     target_group = parse_target_group(require_env("TARGET_GROUP"))
     test_mode = parse_bool(os.getenv("TEST_MODE"), default=True)
-    
+
     # Debug: Show parsed config
     print(f"[DEBUG] Configuration:")
     print(f"  - TARGET_GROUP: {target_group}")
     print(f"  - TEST_MODE: {test_mode} (raw env: '{os.getenv('TEST_MODE')}')")
-    
+    print(f"  - Available Keys: {len(gemini_api_keys)}")
+
     topic_filter = os.getenv("TOPIC_FILTER")
-    ignored_topics = [t.strip() for t in (os.getenv("IGNORED_TOPICS") or "").split(",") if t.strip()]
+    ignored_topics = [
+        t.strip() for t in (os.getenv("IGNORED_TOPICS") or "").split(",") if t.strip()
+    ]
     if ignored_topics:
         print(f"Ignored topics: {ignored_topics}")
 
@@ -540,11 +573,16 @@ async def run() -> None:
             return
 
         total_label = f"{total_topic_count}" if total_topic_count else "unknown"
-        print(f"Found {len(topics)} topics (total: {total_label}). Processing recent messages...")
+        print(
+            f"Found {len(topics)} topics (total: {total_label}). Processing recent messages..."
+        )
 
         summaries_sent = 0
         topics_no_activity: list[str] = []
         topics_no_summary: list[str] = []
+
+        # Track key usage to balance load across topics
+        current_key_usage_idx = 0
 
         for idx, topic in enumerate(topics):
             if topic.title in ignored_topics:
@@ -554,43 +592,56 @@ async def run() -> None:
                 print(f"Skipping closed topic (no speaking permission): {topic.title}")
                 continue
 
-            api_key = gemini_api_keys[idx % len(gemini_api_keys)]
-            ai_client = build_client(api_key)
-
-            messages, truncated = await fetch_messages_for_topic(client, target, topic, cutoff_utc)
+            messages, truncated = await fetch_messages_for_topic(
+                client, target, topic, cutoff_utc
+            )
             if not messages:
                 topics_no_activity.append(topic.title)
                 continue
 
             print(f"Topic '{topic.title}': {len(messages)} messages in window")
-            
+
             summary = ""
             feedback = None
             retried = False
 
+            # Use rotating index for starting key to distribute load
+            start_key_idx = current_key_usage_idx
+
             if len(messages) > CHUNK_SIZE:
                 total_chunks = (len(messages) + CHUNK_SIZE - 1) // CHUNK_SIZE
-                print(f"  > Large topic ({len(messages)} msgs). Splitting into {total_chunks} chunks of {CHUNK_SIZE}...")
+                print(
+                    f"  > Large topic ({len(messages)} msgs). Splitting into {total_chunks} chunks of {CHUNK_SIZE}..."
+                )
                 partial_summaries = []
-                
+
+                local_key_idx = start_key_idx
+
                 for i in range(0, len(messages), CHUNK_SIZE):
                     chunk_num = i // CHUNK_SIZE + 1
                     chunk = messages[i : i + CHUNK_SIZE]
-                    
-                    # Rotate API key per chunk to distribute load
-                    chunk_api_key = gemini_api_keys[chunk_num % len(gemini_api_keys)]
-                    chunk_client = build_client(chunk_api_key)
-                    key_index = chunk_num % len(gemini_api_keys) + 1
-                    
+
                     # Short delay between chunks (except for first)
                     if i > 0:
                         print(f"  > Waiting {CHUNK_DELAY_SECONDS}s...")
                         await asyncio.sleep(CHUNK_DELAY_SECONDS)
-                    
-                    print(f"  > Processing chunk {chunk_num}/{total_chunks} ({len(chunk)} messages) [API key {key_index}]...")
-                    chunk_text = format_messages(chunk, truncated=False, timeframe_label=timeframe_label)
-                    
-                    chunk_summary, chunk_feedback = await run_summary_with_retry(chunk_client, topic.title, chunk_text, timeframe_label)
+
+                    print(
+                        f"  > Processing chunk {chunk_num}/{total_chunks} ({len(chunk)} messages)..."
+                    )
+                    chunk_text = format_messages(
+                        chunk, truncated=False, timeframe_label=timeframe_label
+                    )
+
+                    chunk_summary, chunk_feedback, next_idx = await run_summary_with_retry(
+                        gemini_api_keys,
+                        local_key_idx,
+                        topic.title,
+                        chunk_text,
+                        timeframe_label,
+                    )
+                    local_key_idx = next_idx  # Update local index for next chunk
+
                     if chunk_summary:
                         partial_summaries.append(chunk_summary)
                     else:
@@ -599,36 +650,67 @@ async def run() -> None:
                 if partial_summaries:
                     print(f"  > Waiting {CHUNK_DELAY_SECONDS}s before final summary...")
                     await asyncio.sleep(CHUNK_DELAY_SECONDS)
-                    # Use a different key for final summary
-                    final_api_key = gemini_api_keys[(len(partial_summaries) + 1) % len(gemini_api_keys)]
-                    final_client = build_client(final_api_key)
                     print("  > Generating final summary from partial summaries...")
                     combined_text = "\n\n".join(partial_summaries)
-                    summary, feedback = await run_summary_with_retry(final_client, topic.title, combined_text, timeframe_label)
+                    
+                    # Pass the latest key index to continue rotation
+                    summary, feedback, next_idx = await run_summary_with_retry(
+                        gemini_api_keys,
+                        local_key_idx,
+                        topic.title,
+                        combined_text,
+                        timeframe_label,
+                    )
+                    # Update global index for next topic
+                    current_key_usage_idx = next_idx
                 else:
                     print("  > No partial summaries generated.")
             else:
                 # Standard processing for smaller topics
                 text_data = format_messages(messages, truncated, timeframe_label)
-                summary, feedback = await run_summary_with_retry(ai_client, topic.title, text_data, timeframe_label)
+                summary, feedback, next_idx = await run_summary_with_retry(
+                    gemini_api_keys,
+                    start_key_idx,
+                    topic.title,
+                    text_data,
+                    timeframe_label,
+                )
+                current_key_usage_idx = next_idx
 
             if not summary:
                 retried = False
-                should_retry = (feedback and "prompt_blocked" in feedback) or (feedback and "exception" in feedback)
-                if should_retry and len(messages) > FALLBACK_MESSAGES:
+                should_retry = (feedback and "prompt_blocked" in feedback) or (
+                    feedback and "exception" in feedback
+                )
+                # Note: With new fail-fast logic, blocked prompts shouldn't be retried blindly,
+                # but we keep this fallback specifically for "exception" or if we want to try truncation.
+                # If it was blocked, our new logic breaks early, so maybe we shouldn't retry?
+                # Let's keep the fallback for robust truncation only if it WASN'T a hard block.
+                
+                is_hard_block = feedback and "prompt_blocked" in feedback
+                
+                if (not is_hard_block) and len(messages) > FALLBACK_MESSAGES:
                     fallback_msgs = messages[-FALLBACK_MESSAGES:]
-                    fallback_text = format_messages(fallback_msgs, truncated=True, timeframe_label=timeframe_label)
-                    print(f"Retrying topic '{topic.title}' with last {FALLBACK_MESSAGES} messages due to block/error.")
-                    summary, feedback = await run_summary_with_retry(ai_client, topic.title, fallback_text, timeframe_label)
+                    fallback_text = format_messages(
+                        fallback_msgs, truncated=True, timeframe_label=timeframe_label
+                    )
+                    print(
+                        f"Retrying topic '{topic.title}' with last {FALLBACK_MESSAGES} messages."
+                    )
+                    summary, feedback, next_idx = await run_summary_with_retry(
+                        gemini_api_keys,
+                        current_key_usage_idx,
+                        topic.title,
+                        fallback_text,
+                        timeframe_label,
+                    )
+                    current_key_usage_idx = next_idx
                     if summary:
                         retried = True
 
             if not summary:
-                if feedback:
-                    reason = f"{feedback} (retried)" if retried else feedback
-                    print(f"Gemini blocked topic '{topic.title}' with reason: {reason}")
-                else:
-                    print(f"No summary generated for topic '{topic.title}'.")
+                reason = f"{feedback} (retried)" if retried else feedback
+                print(f"Gemini failed topic '{topic.title}'. Reason: {reason}")
                 topics_no_summary.append(topic.title)
                 continue
 
@@ -645,8 +727,9 @@ async def run() -> None:
                 print(f"Sent summary to {destination}")
                 summaries_sent += 1
             except (UserBannedInChannelError, ChatWriteForbiddenError) as exc:
-                # If posting to the group is blocked, fall back to saving the output locally so the run doesn't fail.
-                print(f"Write restricted for topic '{topic.title}': {exc}. Sending to Saved Messages instead.")
+                print(
+                    f"Write restricted for topic '{topic.title}': {exc}. Sending to Saved Messages instead."
+                )
                 fallback_note = (
                     f"[Summary not delivered] Topic: {topic.title}\n"
                     f"Reason: {exc}\n\n{summary}"
