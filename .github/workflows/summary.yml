@@ -55,7 +55,18 @@ jobs:
           TEST_MODE: ${{ secrets.TEST_MODE || 'false' }}
           IGNORED_TOPICS: ${{ secrets.IGNORED_TOPICS }}
           LAST_RUN_TIMESTAMP: ${{ steps.last-run.outputs.timestamp }}
-        run: python main.py
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -o pipefail
+          python main.py 2>&1 | tee run.log
+
+      - name: Upload runtime log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-summary-runlog-${{ github.run_id }}
+          path: run.log
+          if-no-files-found: warn
 
       # Save current timestamp for next run
       - name: Save current timestamp

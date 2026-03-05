@@ -1,5 +1,7 @@
 import asyncio
 import os
+import signal
+import time
 from datetime import datetime, timedelta
 
 import pytz
@@ -20,6 +22,46 @@ MAX_MESSAGES_PER_TOPIC = 5000
 CHUNK_SIZE = 1000  # Messages per chunk for large topics
 CHUNK_DELAY_SECONDS = 5  # Short delay between API calls
 FALLBACK_MESSAGES = 500
+DEFAULT_MODEL_CALL_TIMEOUT_SECONDS = 45
+
+RUN_START_MONO = time.monotonic()
+RUNTIME_STATE = {
+    "phase": "boot",
+    "topic": "",
+    "topic_index": 0,
+    "topics_total": 0,
+    "summaries_sent": 0,
+    "last_feedback": "",
+}
+
+
+def log(message: str) -> None:
+    elapsed = time.monotonic() - RUN_START_MONO
+    print(f"[T+{elapsed:7.2f}s] {message}", flush=True)
+
+
+def update_runtime_state(**kwargs) -> None:
+    RUNTIME_STATE.update(kwargs)
+
+
+def dump_runtime_diagnostics(reason: str) -> None:
+    log(
+        "DIAGNOSTIC "
+        f"reason={reason} phase={RUNTIME_STATE.get('phase')} "
+        f"topic={RUNTIME_STATE.get('topic')} "
+        f"topic_idx={RUNTIME_STATE.get('topic_index')}/{RUNTIME_STATE.get('topics_total')} "
+        f"summaries_sent={RUNTIME_STATE.get('summaries_sent')} "
+        f"last_feedback={RUNTIME_STATE.get('last_feedback')}"
+    )
+
+
+def install_signal_handlers() -> None:
+    def _handle_signal(signum, _frame):
+        dump_runtime_diagnostics(f"signal_{signum}")
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
 
 SAFETY_SETTINGS = [
     genai_types.SafetySetting(
@@ -454,6 +496,7 @@ async def run_summary_with_retry(
     text_data: str,
     timeframe_label: str,
     max_retries: int = 3,
+    model_call_timeout_seconds: int = DEFAULT_MODEL_CALL_TIMEOUT_SECONDS,
 ) -> tuple[str, str | None, int]:
     """
     Attempts to generate a summary using multiple models and rotating keys.
@@ -473,16 +516,32 @@ async def run_summary_with_retry(
             # Mask key for logging
             masked_key = f"...{api_key[-4:]}" if len(api_key) > 4 else "std"
             print(f"    - Attempt {attempt + 1}/{max_retries} using key {masked_key}")
+            attempt_started = time.monotonic()
 
             try:
-                summary, feedback = run_summary(
-                    client, topic_title, text_data, timeframe_label, model_name
+                summary, feedback = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        run_summary,
+                        client,
+                        topic_title,
+                        text_data,
+                        timeframe_label,
+                        model_name,
+                    ),
+                    timeout=model_call_timeout_seconds,
+                )
+                log(
+                    f"Gemini call finished model={model_name} "
+                    f"attempt={attempt + 1}/{max_retries} "
+                    f"elapsed={time.monotonic() - attempt_started:.2f}s "
+                    f"input_chars={len(text_data)}"
                 )
                 if summary:
                     # Success! Force rotation for next call (Round Robin)
                     return summary, feedback, current_key_idx + 1
 
                 last_feedback = feedback
+                update_runtime_state(last_feedback=str(feedback or ""))
                 print(f"    - Failed: {feedback}")
 
                 # FAIL FAST: Prompt blocked (safety) - do not retry this model
@@ -502,9 +561,23 @@ async def run_summary_with_retry(
                             await asyncio.sleep(2 * (attempt + 1))
                         continue
 
+            except asyncio.TimeoutError:
+                last_feedback = f"model_timeout_after_{model_call_timeout_seconds}s"
+                update_runtime_state(last_feedback=last_feedback)
+                log(
+                    f"Gemini call timeout model={model_name} "
+                    f"attempt={attempt + 1}/{max_retries} "
+                    f"timeout={model_call_timeout_seconds}s "
+                    f"input_chars={len(text_data)}"
+                )
+                if len(api_keys) > 1:
+                    current_key_idx += 1
+                elif attempt < max_retries - 1:
+                    await asyncio.sleep(2 * (attempt + 1))
             except Exception as exc:
                 print(f"    - Exception: {exc}")
                 last_feedback = f"exception: {exc}"
+                update_runtime_state(last_feedback=last_feedback)
                 # Switch key on exception too? Yes, safest.
                 if len(api_keys) > 1:
                     current_key_idx += 1
@@ -521,6 +594,8 @@ async def run() -> None:
     if load_dotenv:
         load_dotenv()
 
+    update_runtime_state(phase="load_config")
+
     api_id = int(require_env("TG_API_ID"))
     api_hash = require_env("TG_API_HASH")
     session_string = require_env("TG_SESSION_STRING")
@@ -535,6 +610,11 @@ async def run() -> None:
         raise RuntimeError(
             "Environment variable GEMINI_API_KEYS (or GEMINI_API_KEY) is required."
         )
+    model_call_timeout_seconds = int(
+        os.getenv("MODEL_CALL_TIMEOUT_SECONDS", str(DEFAULT_MODEL_CALL_TIMEOUT_SECONDS))
+    )
+    if model_call_timeout_seconds < 5:
+        model_call_timeout_seconds = 5
     target_group = parse_target_group(require_env("TARGET_GROUP"))
     test_mode = parse_bool(os.getenv("TEST_MODE"), default=True)
 
@@ -543,6 +623,7 @@ async def run() -> None:
     print(f"  - TARGET_GROUP: {target_group}")
     print(f"  - TEST_MODE: {test_mode} (raw env: '{os.getenv('TEST_MODE')}')")
     print(f"  - Available Keys: {len(gemini_api_keys)}")
+    print(f"  - MODEL_CALL_TIMEOUT_SECONDS: {model_call_timeout_seconds}")
 
     topic_filter = os.getenv("TOPIC_FILTER")
     ignored_topics = [
@@ -557,12 +638,19 @@ async def run() -> None:
         f"{datetime.now(tz=pytz.UTC).astimezone(HK_TZ).strftime('%m/%d %H:%M')} (Asia/Hong_Kong)"
     )
 
+    update_runtime_state(phase="connect_telegram")
     async with TelegramClient(StringSession(session_string), api_id, api_hash) as client:
         if not await client.is_user_authorized():
             raise RuntimeError("The provided session string is not authorized.")
 
+        update_runtime_state(phase="fetch_topics")
         target = await client.get_entity(target_group)
+        topics_fetch_started = time.monotonic()
         topics, total_topic_count = await fetch_topics(client, target)
+        log(
+            f"Fetched topics count={len(topics)} total_count={total_topic_count} "
+            f"elapsed={time.monotonic() - topics_fetch_started:.2f}s"
+        )
 
         if topic_filter:
             topics = [t for t in topics if topic_filter in (t.title or "")]
@@ -587,6 +675,12 @@ async def run() -> None:
         current_key_usage_idx = 0
 
         for idx, topic in enumerate(topics):
+            update_runtime_state(
+                phase="topic_loop",
+                topic=topic.title or "",
+                topic_index=idx + 1,
+                topics_total=len(topics),
+            )
             if topic.title in ignored_topics:
                 print(f"Skipping ignored topic: {topic.title}")
                 continue
@@ -594,8 +688,13 @@ async def run() -> None:
                 print(f"Skipping closed topic (no speaking permission): {topic.title}")
                 continue
 
+            topic_started = time.monotonic()
             messages, truncated = await fetch_messages_for_topic(
                 client, target, topic, cutoff_utc
+            )
+            log(
+                f"Topic fetch done topic='{topic.title}' messages={len(messages)} "
+                f"elapsed={time.monotonic() - topic_started:.2f}s"
             )
             if not messages:
                 topics_no_activity.append(topic.title)
@@ -641,6 +740,7 @@ async def run() -> None:
                         topic.title,
                         chunk_text,
                         timeframe_label,
+                        model_call_timeout_seconds=model_call_timeout_seconds,
                     )
                     local_key_idx = next_idx  # Update local index for next chunk
 
@@ -662,6 +762,7 @@ async def run() -> None:
                         topic.title,
                         combined_text,
                         timeframe_label,
+                        model_call_timeout_seconds=model_call_timeout_seconds,
                     )
                     # Update global index for next topic
                     current_key_usage_idx = next_idx
@@ -676,6 +777,7 @@ async def run() -> None:
                     topic.title,
                     text_data,
                     timeframe_label,
+                    model_call_timeout_seconds=model_call_timeout_seconds,
                 )
                 current_key_usage_idx = next_idx
 
@@ -705,6 +807,7 @@ async def run() -> None:
                         topic.title,
                         fallback_text,
                         timeframe_label,
+                        model_call_timeout_seconds=model_call_timeout_seconds,
                     )
                     current_key_usage_idx = next_idx
                     if summary:
@@ -728,6 +831,7 @@ async def run() -> None:
                 destination = "Saved Messages" if test_mode else f"Topic: {topic.title}"
                 print(f"Sent summary to {destination}")
                 summaries_sent += 1
+                update_runtime_state(summaries_sent=summaries_sent)
             except (UserBannedInChannelError, ChatWriteForbiddenError) as exc:
                 print(
                     f"Write restricted for topic '{topic.title}': {exc}. Sending to Saved Messages instead."
@@ -744,7 +848,7 @@ async def run() -> None:
 
         if summaries_sent == 0 and test_mode:
             notice_lines = [
-                f"No summaries sent from the last {window_hours} hours.",
+                f"No summaries sent for timeframe: {timeframe_label}.",
             ]
             if topics_no_activity:
                 notice_lines.append("No activity in topics: " + ", ".join(topics_no_activity))
@@ -754,6 +858,14 @@ async def run() -> None:
             await client.send_message("me", "\n".join(notice_lines))
             print("Sent notice to Saved Messages about missing summaries.")
 
+    update_runtime_state(phase="done")
+    dump_runtime_diagnostics("normal_exit")
+
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    install_signal_handlers()
+    try:
+        asyncio.run(run())
+    except BaseException:
+        dump_runtime_diagnostics("abnormal_exit")
+        raise
