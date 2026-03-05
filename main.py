@@ -83,8 +83,9 @@ SAFETY_SETTINGS = [
 ]
 
 MODELS_TO_TRY = [
-    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite-preview",
     "gemini-2.5-flash",
+    "gemini-3-flash-preview",
     "gemini-flash-latest",
 ]
 
@@ -465,6 +466,17 @@ def build_client(api_key: str) -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
+def is_model_overloaded_error(feedback: str | None) -> bool:
+    if not feedback:
+        return False
+    normalized = feedback.upper()
+    return (
+        "API_ERROR" in normalized
+        and "503" in normalized
+        and ("UNAVAILABLE" in normalized or "HIGH DEMAND" in normalized)
+    )
+
+
 async def send_summary(
     client: TelegramClient, target, topic: types.ForumTopic, summary: str, message_count: int, test_mode: bool
 ) -> None:
@@ -548,6 +560,14 @@ async def run_summary_with_retry(
                 if feedback and "prompt_blocked" in feedback:
                     print(f"    - Prompt blocked. Skipping remaining retries for {model_name}.")
                     break  # Break attempt loop, move to next model (or stop if all blocked)
+
+                # FAIL FAST: Model overloaded (503 UNAVAILABLE/high demand)
+                if is_model_overloaded_error(feedback):
+                    log(
+                        f"Model overloaded for {model_name}; switching model immediately "
+                        f"(skip remaining retries on this model)."
+                    )
+                    break
 
                 # FALLBACK ROTATION: If API error/Quota, switch key immediately
                 if feedback and ("api_error" in feedback or "finish_reason" in feedback):
